@@ -3,7 +3,6 @@
 *.pyc
 dist/
 build/
-docs/
 *.egg-info/
 *.egg
 *.pyc
@@ -20,3 +19,5 @@ poetry.lock
 .pytest_cache/
 botpy.log
 tests/
+.nanobot/
+venv_311/

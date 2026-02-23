@@ -90,9 +90,60 @@ class WebSearchTool(Tool):
             return f"Error: {e}"
 
 
+def _extract_tweet_id(url: str) -> str | None:
+    """Extract tweet/status ID from x.com or twitter.com URLs."""
+    p = urlparse(url)
+    if p.netloc.replace("www.", "") not in ("x.com", "twitter.com"):
+        return None
+    # Match /USER/status/ID or /i/status/ID
+    m = re.search(r'/status/(\d+)', p.path)
+    return m.group(1) if m else None
+
+
+async def _fetch_tweet(tweet_id: str) -> dict | None:
+    """Fetch tweet content via fxtwitter API."""
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as client:
+            r = await client.get(f"https://api.fxtwitter.com/status/{tweet_id}",
+                                 headers={"User-Agent": USER_AGENT})
+            r.raise_for_status()
+        data = r.json()
+        if data.get("code") != 200:
+            return None
+        t = data["tweet"]
+        author = t.get("author", {})
+        parts = [
+            f"**@{author.get('screen_name', '?')}** ({author.get('name', '')})",
+            f"Followers: {author.get('followers', 0):,}",
+            "",
+            t.get("text", ""),
+            "",
+            f"Likes: {t.get('likes', 0):,} | Retweets: {t.get('retweets', 0):,} | "
+            f"Replies: {t.get('replies', 0):,} | Views: {t.get('views', 0):,}",
+            f"Posted: {t.get('created_at', 'unknown')}",
+        ]
+        # Include media if present
+        if media := t.get("media"):
+            if photos := media.get("photos"):
+                parts.append(f"\nImages: {', '.join(p.get('url', '') for p in photos)}")
+            if videos := media.get("videos"):
+                parts.append(f"\nVideos: {', '.join(v.get('url', '') for v in videos)}")
+        # Include quote tweet if present
+        if quote := t.get("quote"):
+            q_author = quote.get("author", {})
+            parts.extend([
+                "",
+                f"> Quoted @{q_author.get('screen_name', '?')}:",
+                f"> {quote.get('text', '')}",
+            ])
+        return {"url": t.get("url", ""), "text": "\n".join(parts)}
+    except Exception:
+        return None
+
+
 class WebFetchTool(Tool):
     """Fetch and extract content from a URL using Readability."""
-    
+
     name = "web_fetch"
     description = "Fetch URL and extract readable content (HTML → markdown/text)."
     parameters = {
@@ -104,10 +155,10 @@ class WebFetchTool(Tool):
         },
         "required": ["url"]
     }
-    
+
     def __init__(self, max_chars: int = 50000):
         self.max_chars = max_chars
-    
+
     async def execute(self, url: str, extractMode: str = "markdown", maxChars: int | None = None, **kwargs: Any) -> str:
         from readability import Document
 
@@ -117,6 +168,16 @@ class WebFetchTool(Tool):
         is_valid, error_msg = _validate_url(url)
         if not is_valid:
             return json.dumps({"error": f"URL validation failed: {error_msg}", "url": url}, ensure_ascii=False)
+
+        # Handle x.com / twitter.com URLs via fxtwitter API
+        tweet_id = _extract_tweet_id(url)
+        if tweet_id:
+            result = await _fetch_tweet(tweet_id)
+            if result:
+                return json.dumps({"url": url, "finalUrl": result["url"], "status": 200,
+                                  "extractor": "fxtwitter", "truncated": False,
+                                  "length": len(result["text"]), "text": result["text"]}, ensure_ascii=False)
+            return json.dumps({"error": "Failed to fetch tweet via fxtwitter API", "url": url}, ensure_ascii=False)
 
         try:
             async with httpx.AsyncClient(
