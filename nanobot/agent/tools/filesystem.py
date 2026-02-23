@@ -34,7 +34,7 @@ class ReadFileTool(Tool):
     
     @property
     def description(self) -> str:
-        return "Read the contents of a file at the given path."
+        return "Read the contents of a file at the given path. Supports text files and PDFs."
     
     @property
     def parameters(self) -> dict[str, Any]:
@@ -57,12 +57,37 @@ class ReadFileTool(Tool):
             if not file_path.is_file():
                 return f"Error: Not a file: {path}"
 
+            # PDF extraction via pymupdf
+            if file_path.suffix.lower() == ".pdf":
+                return self._read_pdf(file_path)
+
             content = file_path.read_text(encoding="utf-8")
             return content
         except PermissionError as e:
             return f"Error: {e}"
         except Exception as e:
             return f"Error reading file: {str(e)}"
+
+    @staticmethod
+    def _read_pdf(file_path: Path) -> str:
+        """Extract text from a PDF file using pymupdf."""
+        try:
+            import pymupdf
+        except ImportError:
+            return "Error: pymupdf not installed. Run: pip install pymupdf"
+        try:
+            doc = pymupdf.open(str(file_path))
+            pages = []
+            for i, page in enumerate(doc, 1):
+                text = page.get_text().strip()
+                if text:
+                    pages.append(f"--- Page {i} ---\n{text}")
+            doc.close()
+            if not pages:
+                return "Error: PDF contains no extractable text (may be scanned/image-only)"
+            return "\n\n".join(pages)
+        except Exception as e:
+            return f"Error reading PDF: {e}"
 
 
 class WriteFileTool(Tool):
