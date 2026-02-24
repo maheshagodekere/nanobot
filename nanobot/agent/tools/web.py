@@ -13,6 +13,7 @@ from nanobot.agent.tools.base import Tool
 
 # Shared constants
 USER_AGENT = "Mozilla/5.0 (Macintosh; Intel Mac OS X 14_7_2) AppleWebKit/537.36"
+REDDIT_USER_AGENT = "nanobot:v0.1 (by /u/nanobot-ai)"
 MAX_REDIRECTS = 5  # Limit redirects to prevent DoS attacks
 
 
@@ -187,6 +188,88 @@ async def _fetch_youtube(canonical_url: str) -> dict | None:
         return None
 
 
+def _extract_reddit_path(url: str) -> tuple[str, str] | None:
+    """Extract path and content type from Reddit URLs. Returns (path, 'post'|'listing') or None."""
+    p = urlparse(url)
+    host = p.netloc.replace("www.", "")
+    if host not in ("reddit.com", "old.reddit.com", "np.reddit.com"):
+        return None
+    path = p.path.rstrip("/")
+    if not path:
+        return None
+    if re.match(r'/r/[^/]+/comments/', path):
+        return path, "post"
+    if re.match(r'/r/[^/]+$', path):
+        return path, "listing"
+    return None
+
+
+async def _fetch_reddit(path: str, content_type: str) -> dict | None:
+    """Fetch Reddit JSON via old.reddit.com."""
+    try:
+        url = f"https://old.reddit.com{path}.json"
+        params = {"limit": "15"} if content_type == "listing" else {}
+        async with httpx.AsyncClient(timeout=15.0, follow_redirects=True) as client:
+            r = await client.get(url, params=params, headers={"User-Agent": REDDIT_USER_AGENT})
+            r.raise_for_status()
+        data = r.json()
+        if content_type == "post":
+            return _format_reddit_post(data)
+        return _format_reddit_listing(data)
+    except Exception:
+        return None
+
+
+def _format_reddit_post(data: list) -> dict | None:
+    """Format a Reddit post with top comments."""
+    try:
+        post = data[0]["data"]["children"][0]["data"]
+        parts = [
+            f"**{post.get('title', '')}**",
+            f"r/{post.get('subreddit', '')} | u/{post.get('author', '[deleted]')} | "
+            f"Score: {post.get('score', 0):,}",
+        ]
+        if selftext := post.get("selftext", ""):
+            parts.extend(["", selftext[:3000]])
+        if post.get("url") and not post.get("is_self"):
+            parts.append(f"\nLink: {post['url']}")
+        # Top comments
+        comments = data[1]["data"]["children"][:5]
+        top = []
+        for c in comments:
+            if c["kind"] != "t1":
+                continue
+            cd = c["data"]
+            body = cd.get("body", "")[:500]
+            top.append(f"  u/{cd.get('author', '[deleted]')} ({cd.get('score', 0):,} pts): {body}")
+        if top:
+            parts.extend(["", "**Top Comments:**"] + top)
+        text = "\n".join(parts)
+        return {"url": f"https://www.reddit.com{post.get('permalink', '')}", "text": text}
+    except (KeyError, IndexError):
+        return None
+
+
+def _format_reddit_listing(data: dict) -> dict | None:
+    """Format a Reddit subreddit listing."""
+    try:
+        children = data["data"]["children"]
+        posts = []
+        for c in children[:15]:
+            if c["kind"] != "t3":
+                continue
+            d = c["data"]
+            flair = f" [{d['link_flair_text']}]" if d.get("link_flair_text") else ""
+            posts.append(f"- ({d.get('score', 0):,}) {d.get('title', '')}{flair} [u/{d.get('author', '?')}]")
+        if not posts:
+            return None
+        sub = children[0]["data"].get("subreddit", "?")
+        text = f"**r/{sub}** — Top posts:\n\n" + "\n".join(posts)
+        return {"url": f"https://www.reddit.com/r/{sub}", "text": text}
+    except (KeyError, IndexError):
+        return None
+
+
 class WebFetchTool(Tool):
     """Fetch and extract content from a URL using Readability."""
 
@@ -234,6 +317,17 @@ class WebFetchTool(Tool):
                                   "extractor": "youtube", "truncated": False,
                                   "length": len(result["text"]), "text": result["text"]}, ensure_ascii=False)
             return json.dumps({"error": "Failed to fetch YouTube video metadata", "url": url}, ensure_ascii=False)
+
+        # Handle Reddit URLs via JSON API
+        reddit = _extract_reddit_path(url)
+        if reddit:
+            path, content_type = reddit
+            result = await _fetch_reddit(path, content_type)
+            if result:
+                return json.dumps({"url": url, "finalUrl": result["url"], "status": 200,
+                                  "extractor": "reddit", "truncated": False,
+                                  "length": len(result["text"]), "text": result["text"]}, ensure_ascii=False)
+            return json.dumps({"error": "Failed to fetch Reddit content", "url": url}, ensure_ascii=False)
 
         try:
             async with httpx.AsyncClient(

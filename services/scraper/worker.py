@@ -66,8 +66,9 @@ async def process_job(job: dict) -> None:
                 f.write(json.dumps(row, ensure_ascii=False) + "\n")
 
             done += 1
+            logger.info("[%s] %d/%d ok %s", job_id, i + 1, len(urls[:max_pages]), url)
         except Exception as e:
-            logger.warning("Failed to fetch %s: %s", url, e)
+            logger.warning("[%s] %d/%d FAIL %s — %s", job_id, i + 1, len(urls[:max_pages]), url, e)
             errors.append({"url": url, "error": str(e)})
             # Write error row to results too
             with open(output_path, "a") as f:

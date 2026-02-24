@@ -49,7 +49,8 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
-    
+        self.max_concurrent = 3
+
     async def spawn(
         self,
         task: str,
@@ -59,16 +60,19 @@ class SubagentManager:
     ) -> str:
         """
         Spawn a subagent to execute a task in the background.
-        
+
         Args:
             task: The task description for the subagent.
             label: Optional human-readable label for the task.
             origin_channel: The channel to announce results to.
             origin_chat_id: The chat ID to announce results to.
-        
+
         Returns:
             Status message indicating the subagent was started.
         """
+        if len(self._running_tasks) >= self.max_concurrent:
+            return f"Cannot spawn subagent: {self.max_concurrent} already running. Try again when one finishes."
+
         task_id = str(uuid.uuid4())[:8]
         display_label = label or task[:30] + ("..." if len(task) > 30 else "")
         
@@ -123,7 +127,7 @@ class SubagentManager:
             ]
             
             # Run agent loop (limited iterations)
-            max_iterations = 15
+            max_iterations = 25
             iteration = 0
             final_result: str | None = None
             
@@ -173,15 +177,20 @@ class SubagentManager:
                     break
             
             if final_result is None:
-                final_result = "Task completed but no final response was generated."
-            
-            logger.info("Subagent [{}] completed successfully", task_id)
-            await self._announce_result(task_id, label, task, final_result, origin, "ok")
-            
+                final_result = f"Task stopped after {max_iterations} iterations without a final response."
+                logger.warning("Subagent [{}] exhausted {} iterations", task_id, max_iterations)
+                await self._announce_result(task_id, label, task, final_result, origin, "timeout")
+            else:
+                logger.info("Subagent [{}] completed successfully", task_id)
+                await self._announce_result(task_id, label, task, final_result, origin, "ok")
+
         except Exception as e:
             error_msg = f"Error: {str(e)}"
             logger.error("Subagent [{}] failed: {}", task_id, e)
-            await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            try:
+                await self._announce_result(task_id, label, task, error_msg, origin, "error")
+            except Exception as announce_err:
+                logger.error("Subagent [{}] failed to announce error: {}", task_id, announce_err)
     
     async def _announce_result(
         self,
@@ -193,16 +202,23 @@ class SubagentManager:
         status: str,
     ) -> None:
         """Announce the subagent result to the main agent via the message bus."""
-        status_text = "completed successfully" if status == "ok" else "failed"
-        
-        announce_content = f"""[Subagent '{label}' {status_text}]
+        status_map = {
+            "ok": "completed successfully",
+            "error": "failed with an error",
+            "timeout": "timed out (hit iteration limit)",
+        }
+        status_text = status_map.get(status, f"finished with status: {status}")
+
+        announce_content = f"""[Background task '{label}' — {status_text}]
 
 Task: {task}
 
 Result:
 {result}
 
-Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not mention technical details like "subagent" or task IDs."""
+Tell the user the result. Always include the status ({status_text}).
+If it succeeded, summarize the key findings briefly.
+If it failed or timed out, explain what went wrong so they can retry."""
         
         # Inject as system message to trigger main agent
         msg = InboundMessage(
