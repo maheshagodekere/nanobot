@@ -22,6 +22,41 @@ services:
           cpus: '0.25'
           memory: 256M
   
+  nanobot-knowledge:
+    image: python:3.12-slim
+    container_name: nanobot-knowledge
+    volumes:
+      - ~/.nanobot/workspace/knowledge:/srv/knowledge:ro
+    command: ["python3", "-m", "http.server", "8080", "--directory", "/srv/knowledge"]
+    restart: unless-stopped
+    ports:
+      - "8080:8080"
+    deploy:
+      resources:
+        limits:
+          cpus: '0.25'
+          memory: 64M
+
+  nanobot-scraper:
+    build:
+      context: ./services/scraper
+      dockerfile: Dockerfile
+    container_name: nanobot-scraper
+    volumes:
+      - ~/.nanobot/workspace/knowledge:/knowledge
+      - scraper-db:/data
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 512M
+        reservations:
+          cpus: '0.25'
+          memory: 128M
+
   nanobot-cli:
     <<: *common-config
     profiles:
@@ -29,3 +64,6 @@ services:
     command: ["status"]
     stdin_open: true
     tty: true
+
+volumes:
+  scraper-db:
