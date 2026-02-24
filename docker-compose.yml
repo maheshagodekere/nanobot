@@ -12,7 +12,7 @@ services:
     command: ["gateway"]
     restart: unless-stopped
     environment:
-      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
     ports:
       - 18790:18790
     deploy:
